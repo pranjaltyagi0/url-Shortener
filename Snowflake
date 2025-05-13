@@ -1,0 +1,91 @@
+from typing import Optional
+
+from tenacity import retry, stop_after_attempt, wait_exponential
+from langchain_community.utilities import SQLDatabase
+
+from config import settings
+from logs import get_logger
+
+logger = get_logger(__name__)
+
+
+class DatabaseError(Exception):
+    """Raised when there's an issue with database operations."""
+
+
+class TokenAcquisitionError(Exception):
+    """Raised when there's an issue with acquiring OAuth tokens."""
+
+
+class SnowflakeConnector:
+    """
+    Singleton class to manage Snowflake connections using OAuth or password authentication.
+    """
+    _instance = None
+    _db: Optional[SQLDatabase] = None
+
+    def __new__(cls, *args, **kwargs):
+        """Ensure only one instance of SnowflakeConnector is created."""
+        if cls._instance is None:
+            cls._instance = super(SnowflakeConnector, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, connection_timeout: int = 30, max_retries: int = 3):
+        if hasattr(self, "_initialized") and self._initialized:
+            return
+        self._initialized = True
+
+        self._load_config()
+        self._connection_timeout = connection_timeout
+        self._max_retries = max_retries
+        self.connect_to_db()
+
+    def _load_config(self):
+        """Load and set environment variables from the config."""
+        self.snowflake_conn_str = settings.SNOWFLAKE_CONN_STR
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    def connect_to_db(self) -> SQLDatabase:
+        """
+        Establish or reuse a database connection with retry logic.
+        """
+        try:
+            if SnowflakeConnector._db:
+                return SnowflakeConnector._db
+
+            logger.info("Forming new manual Snowflake connection.")
+            SnowflakeConnector._db = SQLDatabase.from_uri(self.snowflake_conn_str)
+            return SnowflakeConnector._db
+        except Exception as e:
+            raise DatabaseError("Failed to establish database connection.") from e
+
+    def get_db(self) -> SQLDatabase:
+        return self.connect_to_db()
+
+    def is_connected(self) -> bool:
+        try:
+            if SnowflakeConnector._db:
+                SnowflakeConnector._db.run("SELECT 1")
+                return True
+        except Exception:
+            SnowflakeConnector._db = None
+        return False
+
+    def reconnect(self) -> None:
+        logger.info("Reconnecting to Snowflake database.")
+        self.close()
+        self.connect_to_db()
+
+    def close(self) -> None:
+        if SnowflakeConnector._db:
+            try:
+                SnowflakeConnector._db._engine.dispose()
+                logger.info("Snowflake database connection closed.")
+            except Exception:
+                pass
+            finally:
+                SnowflakeConnector._db = None
