@@ -1,0 +1,103 @@
+# redis_client.py
+from typing import Optional
+import asyncio
+from redis.asyncio import Redis
+from config import settings
+from logs import get_logger
+
+logger = get_logger(__name__)
+
+class RedisClient:
+    _instance: Optional[Redis] = None
+    _lock = asyncio.Lock()
+
+    @classmethod
+    async def get_client(cls) -> Redis:
+        """
+        Returns a shared Redis client instance.
+        Thread-safe with asyncio lock.
+        """
+        if cls._instance is None:
+            async with cls._lock:
+                if cls._instance is None:  # double-checked locking
+                    client = Redis(
+                        host=settings.REDIS_URI,
+                        port=int(settings.REDIS_PORT),
+                        db=int(settings.REDIS_DATABASE),
+                        decode_responses=True
+                    )
+                    try:
+                        await client.ping()
+                        cls._instance = client
+                        logger.info("Connected to Redis.")
+                    except Exception as e:
+                        logger.error(f"Failed to connect to Redis: {e}")
+                        raise
+        return cls._instance
+
+    @classmethod
+    async def close(cls):
+        """
+        Closes the Redis connection and resets the instance.
+        """
+        if cls._instance:
+            await cls._instance.close()
+            cls._instance = None
+            logger.info("Redis connection closed.")
+
+
+
+
+
+# redis_client.py
+from typing import Optional
+import asyncio
+from redis.asyncio import Redis
+from config import settings
+from logs import get_logger
+
+logger = get_logger(__name__)
+
+class RedisClient:
+    _instance = None
+    _lock = asyncio.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(RedisClient, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        self._client: Optional[Redis] = None
+
+    async def init(self):
+        """
+        Initialize Redis connection (call this once manually).
+        """
+        if self._client is None:
+            async with self._lock:
+                if self._client is None:
+                    client = Redis(
+                        host=settings.REDIS_URI,
+                        port=int(settings.REDIS_PORT),
+                        db=int(settings.REDIS_DATABASE),
+                        decode_responses=True
+                    )
+                    try:
+                        await client.ping()
+                        self._client = client
+                        logger.info("Connected to Redis.")
+                    except Exception as e:
+                        logger.error(f"Failed to connect to Redis: {e}")
+                        raise
+
+    def get_client(self) -> Redis:
+        if not self._client:
+            raise RuntimeError("RedisClient is not initialized. Call await init() first.")
+        return self._client
+
+    async def close(self):
+        if self._client:
+            await self._client.close()
+            self._client = None
+            logger.info("Redis connection closed.")
