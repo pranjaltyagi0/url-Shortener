@@ -1,0 +1,61 @@
+from typing import Dict
+from langchain_openai import AzureChatOpenAI
+from config import settings
+from logs import get_logger
+from utils import RedisClient
+
+logger = get_logger(__name__)
+
+class LLMManager:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(LLMManager, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if not hasattr(self, "_initialized"):
+            self._initialize()
+            self._initialized = True
+
+    def _initialize(self):
+        self.azure_endpoint = settings.AZURE_ENDPOINT
+        self.azure_api_version = settings.AZURE_API_VERSION
+        key_raws = settings.AZURE_API_KEYS
+        self.azure_api_keys = [k.strip() for k in key_raws.split(",") if k.strip()]
+        self.key_count = len(self.azure_api_keys)
+        self._llm_instances: Dict[str, AzureChatOpenAI] = {}
+
+    async def _get_next_azure_key(self) -> str:
+        redis_client = await RedisClient.get_client()
+        index = await redis_client.incr("azure_api_key_index") % self.key_count
+        return self.azure_api_keys[index]
+
+    def _create_azure_llm(self, deployment_name: str, api_key: str, **kwargs) -> AzureChatOpenAI:
+        base_params = {
+            "api_key": api_key,
+            "azure_deployment": deployment_name,
+            "azure_endpoint": self.azure_endpoint,
+            "api_version": self.azure_api_version,
+            "max_retries": 3,
+            "timeout": 240.0 if deployment_name.startswith("o") else 120.0,
+        }
+        return AzureChatOpenAI(**base_params, **kwargs)
+
+    @classmethod
+    async def get_llm(cls, deployment_name: str) -> AzureChatOpenAI:
+        if not deployment_name:
+            raise ValueError("Deployment name must be provided.")
+
+        instance = cls()
+        api_key = await instance._get_next_azure_key()
+        cache_key = f"azure_{deployment_name}_{api_key[:8]}"
+
+        if cache_key not in instance._llm_instances:
+            logger.info(f"Initializing {deployment_name} for key ***{api_key[:8]}")
+            instance._llm_instances[cache_key] = instance._create_azure_llm(deployment_name, api_key)
+        else:
+            logger.info(f"Using existing {deployment_name} for key ***{api_key[:8]}")
+
+        return instance._llm_instances[cache_key]
