@@ -1,0 +1,114 @@
+from typing import Dict, Any, List
+import yaml
+import aiofiles
+from fastapi.concurrency import run_in_threadpool
+
+from logs import get_logger
+from utils import SnowflakeConnector
+
+logger = get_logger(__name__)
+
+
+class SQLAgent:
+    """Agent to execute SQL queries and retrieve structured results."""
+
+    _query_cache: Dict[str, List] = {}  # Changed from None to empty dict
+
+    @classmethod
+    async def _load_config(cls, config_path: str = "sql_agent/Latest_data_date.yaml", force_reload: bool = False) -> Dict[str, List]:
+        """
+        Load SQL queries from a YAML file using aiofiles with optional caching.
+
+        Args:
+            config_path (str): Path to the YAML file.
+            force_reload (bool): Whether to force reload even if cached.
+
+        Returns:
+            Dict[str, List]: Parsed YAML content.
+
+        Raises:
+            RuntimeError: If loading the config fails.
+        """
+        if not force_reload and cls._query_cache:
+            logger.debug("Using cached SQL config.")
+            return cls._query_cache
+
+        try:
+            async with aiofiles.open(config_path, "r") as f:
+                data = await f.read()
+                content = yaml.safe_load(data)
+            cls._query_cache = content
+            logger.info(f"Loaded SQL config from {config_path}")
+            return content
+        except Exception as e:
+            logger.exception("Failed to load SQL config.")
+            raise RuntimeError("Loading SQL queries failed.") from e
+
+    @staticmethod
+    async def generate_query_and_execute(query: str) -> Dict[str, Any]:
+        """
+        Execute SQL query using a Snowflake connector.
+
+        Args:
+            query (str): The SQL query to execute.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing the result of the query.
+
+        Raises:
+            RuntimeError: If execution fails.
+        """
+        if not query:
+            raise ValueError("Query cannot be empty.")
+
+        try:
+            connector = SnowflakeConnector()
+            db = connector.get_db()
+
+            if not db:
+                raise ConnectionError("Unable to connect to Snowflake.")
+
+            queries = [q.strip() for q in query.split(";") if q.strip()]
+            logger.info(f"Executing {len(queries)} query(ies)...")
+
+            if len(queries) == 1:
+                result = await run_in_threadpool(db.run, queries[0], include_columns=True)
+            else:
+                result = {}
+                for i, single_query in enumerate(queries):
+                    res = await run_in_threadpool(db.run, single_query, include_columns=True)
+                    result[f"Data Table {i+1}"] = res
+
+            return {"result": result}
+        except Exception as e:
+            logger.exception("Query execution failed.")
+            raise RuntimeError("Query generation or execution failed.") from e
+
+    @staticmethod
+    async def get_date() -> Dict[str, str]:
+        """
+        Retrieves the latest date information for configured database tables.
+
+        Loads table configurations from a YAML file and executes each query.
+
+        Returns:
+            Dict[str, str]: Mapping of table names to query results.
+
+        Raises:
+            RuntimeError: If query execution fails.
+        """
+        try:
+            result_map: Dict[str, str] = {}
+            content = await SQLAgent._load_config()
+
+            for table in content.get("tables", []):
+                name = table["name"]
+                query = table["queries"]["date_query"]
+                db_result = await SQLAgent.generate_query_and_execute(query)
+                result_map[name] = db_result["result"]
+
+            logger.info(f"Retrieved latest date info for {len(result_map)} tables.")
+            return result_map
+        except Exception as e:
+            logger.exception("Failed to retrieve date information.")
+            raise RuntimeError("Failed to retrieve date information from database.") from e
